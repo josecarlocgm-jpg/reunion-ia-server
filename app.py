@@ -198,11 +198,7 @@ def procesar_reunion():
         # Limpiar archivo temporal
         os.unlink(tmp_path)
         
-        return jsonify({
-            "status": "ok",
-            "transcripcion": transcripcion,
-            "resumen": resumen
-        })
+        return resumen, 200, {'Content-Type': 'text/plain; charset=utf-8'}
     
     except Exception as e:
         # Limpiar archivo temporal si existe
