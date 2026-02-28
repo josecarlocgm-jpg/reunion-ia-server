@@ -1,11 +1,13 @@
 """
 Servidor para procesar reuniones: Graba audio -> Whisper (transcribe) -> Claude (resume)
-Version 2: Procesamiento en segundo plano + pagina web con contrasena.
+Version 3: Procesamiento en segundo plano + pagina web con contrasena + email automatico.
 
 Requiere variables de entorno:
   OPENAI_API_KEY=sk-proj-xxx
   ANTHROPIC_API_KEY=sk-ant-api03-xxx
   APP_PASSWORD=tu_contrasena_secreta
+  GMAIL_USER=tu_correo@gmail.com
+  GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx
 """
 
 import os
@@ -14,6 +16,9 @@ import math
 import threading
 import uuid
 import hashlib
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 from functools import wraps
 from flask import Flask, request, jsonify, Response, session, redirect, url_for
@@ -27,6 +32,8 @@ app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "reunion2026")
+GMAIL_USER = os.environ.get("GMAIL_USER", "")
+GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
 
 WHISPER_MAX_SIZE = 25 * 1024 * 1024
 
@@ -59,6 +66,50 @@ Reglas: Se directo. No inventes informacion que no este en la transcripcion. Si 
 
 TRANSCRIPCION:
 {transcripcion}"""
+
+
+def enviar_email(resumen, fecha):
+    """Envia el resumen por email."""
+    if not GMAIL_USER or not GMAIL_APP_PASSWORD:
+        print("Email no configurado, saltando envio")
+        return
+
+    try:
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = f"Resumen Reunion - {fecha}"
+        msg['From'] = GMAIL_USER
+        msg['To'] = GMAIL_USER
+
+        # Version texto plano
+        texto_plano = resumen
+
+        # Version HTML bonita
+        resumen_html = resumen.replace("\n", "<br>")
+        html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head><body style="font-family: -apple-system, Arial, sans-serif; max-width: 700px; margin: 0 auto; padding: 20px; background: #f5f5f5;">
+<div style="background: white; border-radius: 12px; padding: 30px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+<h1 style="color: #e94560; margin-top: 0; font-size: 22px;">Resumen de Reunion</h1>
+<p style="color: #888; font-size: 14px;">{fecha}</p>
+<hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+<div style="font-size: 15px; line-height: 1.6; color: #333;">
+{resumen_html}
+</div>
+<hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+<p style="color: #aaa; font-size: 12px; text-align: center;">Generado por Reunion IA</p>
+</div>
+</body></html>"""
+
+        msg.attach(MIMEText(texto_plano, 'plain', 'utf-8'))
+        msg.attach(MIMEText(html, 'html', 'utf-8'))
+
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+            server.sendmail(GMAIL_USER, GMAIL_USER, msg.as_string())
+
+        print(f"Email enviado a {GMAIL_USER}")
+
+    except Exception as e:
+        print(f"Error enviando email: {e}")
 
 
 def requiere_login(f):
@@ -170,6 +221,10 @@ def procesar_en_segundo_plano(job_id, tmp_path, filename):
         resultados[job_id]["transcripcion"] = transcripcion
         print(f"[{job_id}] Completado!")
 
+        # Enviar email automaticamente
+        fecha = resultados[job_id].get("fecha", "")
+        enviar_email(resumen, fecha)
+
     except Exception as e:
         resultados[job_id]["estado"] = "error"
         resultados[job_id]["error"] = str(e)
@@ -247,6 +302,7 @@ pre { background: #0f3460; padding: 15px; border-radius: 8px; white-space: pre-w
 .copy-btn { background: #e94560; color: white; border: none; padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 14px; margin-top: 10px; }
 .copy-btn:hover { background: #c13350; }
 .transcripcion-btn { background: #0f3460; color: #aaa; border: 1px solid #444; padding: 6px 12px; border-radius: 8px; cursor: pointer; font-size: 13px; margin-top: 8px; margin-left: 8px; }
+.email-badge { font-size: 12px; color: #2ecc71; margin-left: 10px; }
 </style></head><body>
 <div class="header">
 <h1>Reunion IA</h1>
@@ -262,7 +318,7 @@ pre { background: #0f3460; padding: 15px; border-radius: 8px; white-space: pre-w
             fecha = data.get("fecha", "")
 
             if estado == "listo":
-                badge = '<span class="estado listo">Listo</span>'
+                badge = '<span class="estado listo">Listo</span><span class="email-badge">✉ Email enviado</span>'
             elif estado == "error":
                 badge = '<span class="estado error">Error</span>'
             else:
@@ -313,7 +369,6 @@ function toggleTranscripcion(id) {
 
 @app.route("/procesar", methods=["POST"])
 def procesar_reunion():
-    """Recibe audio, inicia procesamiento en segundo plano, responde inmediatamente."""
     if "audio" not in request.files:
         return "Error: No se envio archivo de audio. Usa el campo 'audio'", 400
 
@@ -341,8 +396,9 @@ def procesar_reunion():
         hilo.start()
 
         dominio = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "reunion-ia-server-production.up.railway.app")
+        email_msg = f"\nTe llegara un email a {GMAIL_USER} cuando este listo." if GMAIL_USER else ""
 
-        return f"Audio recibido! Tu reunion se esta procesando.\n\nRevisa el resumen en:\nhttps://{dominio}\n\nID: {job_id}\nFecha: {fecha}", 200, {'Content-Type': 'text/plain; charset=utf-8'}
+        return f"Audio recibido! Tu reunion se esta procesando.{email_msg}\n\nRevisa el resumen en:\nhttps://{dominio}\n\nID: {job_id}\nFecha: {fecha}", 200, {'Content-Type': 'text/plain; charset=utf-8'}
 
     except Exception as e:
         return f"Error: {str(e)}", 500
